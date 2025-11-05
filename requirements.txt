@@ -1,0 +1,5 @@
+# requirements.txt
+fusepy
+pyyaml
+python-dotenv
+requests
