@@ -6,6 +6,8 @@ import stat
 import errno
 import time
 import yaml
+import atexit
+from pathlib import Path
 from fuse import FUSE, FuseOSError, Operations
 from dotenv import load_dotenv
 
@@ -32,16 +34,20 @@ class QueryFolder:
     def __init__(self, name):
         self.name = name
         self.enabled = False
+        self.persistent = False  # Flag to persist this query on unmount
         self.jira_config = {'jql': ''}
         self.issues = []
         self.last_updated = 0
         
     def to_yaml(self):
         """Convert configuration to YAML string."""
-        return yaml.dump({
+        # Dict maintains insertion order in Python 3.7+
+        config = {
             'enabled': self.enabled,
+            'persistent': self.persistent,
             'jira': [self.jira_config]
-        }, default_flow_style=False)
+        }
+        return yaml.dump(config, default_flow_style=False, sort_keys=False)
     
     def from_yaml(self, yaml_content):
         """Load configuration from YAML string."""
@@ -49,6 +55,7 @@ class QueryFolder:
             data = yaml.safe_load(yaml_content)
             if data:
                 self.enabled = data.get('enabled', False)
+                self.persistent = data.get('persistent', False)
                 jira_list = data.get('jira', [])
                 if jira_list and isinstance(jira_list, list) and len(jira_list) > 0:
                     self.jira_config = jira_list[0]
@@ -87,11 +94,21 @@ class JiraFS(Operations):
         └── ...
     """
     
-    def __init__(self, jira_client):
+    def __init__(self, jira_client, mountpoint, config_file=None):
         self.jira = jira_client
         self.folders = {}  # folder_name -> QueryFolder
         self.file_handles = {}  # path -> content
         self.now = time.time()
+        self.mountpoint = os.path.abspath(mountpoint)
+        
+        # Setup config file path
+        if config_file is None:
+            config_file = Path.home() / '.issuefs' / 'config.yaml'
+        self.config_file = Path(config_file)
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Load persistent configurations for this mountpoint
+        self._load_config()
         
         # Fetch JIRA version info at startup
         print("Testing JIRA connection...")
@@ -104,6 +121,101 @@ class JiraFS(Operations):
             print(f"✗ Warning: Could not connect to JIRA: {self.version_info.get('error', 'Unknown error')}")
             print("  Filesystem will still mount, but queries may fail.")
         print()
+        
+        # Register cleanup handler for saving config on exit
+        atexit.register(self._save_config)
+        
+    def _load_config(self):
+        """Load persistent configurations for this mountpoint from YAML file."""
+        if not self.config_file.exists():
+            print("No persistent configuration found.")
+            return
+        
+        try:
+            with open(self.config_file, 'r') as f:
+                data = yaml.safe_load(f)
+            
+            if not data or 'mountpoints' not in data:
+                print("No persistent configuration found.")
+                return
+            
+            # Get configurations for this specific mountpoint
+            mountpoint_config = data['mountpoints'].get(self.mountpoint, {})
+            folders_config = mountpoint_config.get('folders', {})
+            
+            if not folders_config:
+                print("No persistent queries for this mountpoint.")
+                return
+            
+            print(f"Loading {len(folders_config)} persistent query folder(s)...")
+            
+            for folder_name, config in folders_config.items():
+                folder = QueryFolder(folder_name)
+                folder.enabled = config.get('enabled', False)
+                folder.persistent = config.get('persistent', False)
+                folder.jira_config = config.get('jira_config', {'jql': ''})
+                self.folders[folder_name] = folder
+                
+                jql_preview = folder.jira_config.get('jql', '')[:50]
+                if len(folder.jira_config.get('jql', '')) > 50:
+                    jql_preview += '...'
+                print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, jql='{jql_preview}')")
+                
+                # Fetch issues if enabled and has JQL
+                if folder.enabled and folder.jira_config.get('jql'):
+                    folder.update_issues(self.jira)
+                    
+        except yaml.YAMLError as e:
+            print(f"Error parsing config file: {e}")
+        except Exception as e:
+            print(f"Error loading config: {e}")
+    
+    def _save_config(self):
+        """Save persistent configurations for this mountpoint to YAML file."""
+        # Collect only persistent folders
+        persistent_folders = {
+            name: {
+                'enabled': folder.enabled,
+                'persistent': folder.persistent,
+                'jira_config': folder.jira_config
+            }
+            for name, folder in self.folders.items()
+            if folder.persistent
+        }
+        
+        if not persistent_folders:
+            print("\nNo persistent queries to save.")
+            return
+        
+        # Load existing config or create new one
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r') as f:
+                    data = yaml.safe_load(f) or {}
+            except (yaml.YAMLError, Exception):
+                data = {}
+        else:
+            data = {}
+        
+        # Ensure mountpoints key exists
+        if 'mountpoints' not in data:
+            data['mountpoints'] = {}
+        
+        # Update this mountpoint's configuration
+        data['mountpoints'][self.mountpoint] = {
+            'folders': persistent_folders,
+            'last_updated': time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Save to file
+        try:
+            with open(self.config_file, 'w') as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            print(f"\n✓ Saved {len(persistent_folders)} persistent query folder(s) to {self.config_file}")
+            for name in persistent_folders.keys():
+                print(f"  - {name}")
+        except Exception as e:
+            print(f"\n✗ Error saving config: {e}")
         
     def _get_folder_from_path(self, path):
         """Extract folder name from path."""
@@ -437,12 +549,13 @@ def main(mountpoint):
     print("  2. Edit config: vi <mountpoint>/my_query/config.yaml")
     print("  3. Configure with:")
     print("     enabled: true")
+    print("     persistent: true  # Set to true to save on unmount")
     print("     jira:")
     print("       - jql: 'your JQL query'")
     print("  4. Issues will appear as .txt files in the folder")
     print("\nPress Ctrl+C to unmount\n")
     
-    FUSE(JiraFS(jira_client), mountpoint, foreground=True, allow_other=False)
+    FUSE(JiraFS(jira_client, mountpoint), mountpoint, foreground=True, allow_other=False)
     print(f"Filesystem unmounted from: {mountpoint}")
 
 
