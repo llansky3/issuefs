@@ -102,10 +102,23 @@ class JiraFS(Operations):
         self.mountpoint = os.path.abspath(mountpoint)
         
         # Setup config file path
+        # Priority: 1. Parameter, 2. Environment variable, 3. Default
         if config_file is None:
-            config_file = Path.home() / '.issuefs' / 'config.yaml'
-        self.config_file = Path(config_file)
+            env_config = os.getenv('PERSISTENT_CONFIG')
+            if env_config:
+                config_file = Path(env_config)
+                print(f"Using persistent config from env: {config_file}")
+            else:
+                config_file = Path.home() / '.issuefs' / 'persistent.yaml'
+        else:
+            config_file = Path(config_file)
+        
+        self.config_file = config_file
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize config file if it doesn't exist
+        if not self.config_file.exists():
+            self._initialize_config_file()
         
         # Load persistent configurations for this mountpoint
         self._load_config()
@@ -124,6 +137,39 @@ class JiraFS(Operations):
         
         # Register cleanup handler for saving config on exit
         atexit.register(self._save_config)
+        
+    def _get_config_header(self):
+        """Generate the header comment for the persistent config file."""
+        lines = [
+            "# issuefs - persistent configuration",
+            "# This file stores persistent query folder configurations",
+            "# across multiple mountpoints.",
+            "#",
+            "# Format:",
+            "#   mountpoints:",
+            "#     /path/to/mountpoint:",
+            "#       folders:",
+            "#         query_name:",
+            "#           enabled: true",
+            "#           persistent: true",
+            "#           jira_config:",
+            "#             jql: 'your JQL query'",
+            "#",
+            "# This file is automatically managed by issuefs.",
+            "# Manual editing is supported but be careful with YAML syntax.",
+            "",
+        ]
+        return "\n".join(lines) + "\n"
+        
+    def _initialize_config_file(self):
+        """Initialize a new persistent config file with header comment."""
+        try:
+            with open(self.config_file, 'w') as f:
+                f.write(self._get_config_header())
+                yaml.dump({'mountpoints': {}}, f, default_flow_style=False, sort_keys=False)
+            print(f"Created new persistent config file: {self.config_file}")
+        except Exception as e:
+            print(f"Warning: Could not create config file: {e}")
         
     def _load_config(self):
         """Load persistent configurations for this mountpoint from YAML file."""
@@ -187,12 +233,16 @@ class JiraFS(Operations):
             print("\nNo persistent queries to save.")
             return
         
+        # Ensure directory exists
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        
         # Load existing config or create new one
         if self.config_file.exists():
             try:
                 with open(self.config_file, 'r') as f:
                     data = yaml.safe_load(f) or {}
-            except (yaml.YAMLError, Exception):
+            except (yaml.YAMLError, Exception) as e:
+                print(f"Warning: Could not parse existing config, creating new one: {e}")
                 data = {}
         else:
             data = {}
@@ -210,6 +260,9 @@ class JiraFS(Operations):
         # Save to file
         try:
             with open(self.config_file, 'w') as f:
+                # Write header comment
+                f.write(self._get_config_header())
+                # Write YAML data
                 yaml.dump(data, f, default_flow_style=False, sort_keys=False)
             print(f"\n✓ Saved {len(persistent_folders)} persistent query folder(s) to {self.config_file}")
             for name in persistent_folders.keys():

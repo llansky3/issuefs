@@ -5,6 +5,11 @@ VENV = venv
 VENV_ACTIVATE = $(VENV)/bin/activate
 
 # IssueFS specific settings
+# Try to load MOUNTPOINT from .env file, otherwise use default
+-include .env
+export
+
+# Set default if not defined in .env
 MOUNTPOINT ?= /tmp/jira
 
 .PHONY: help venv install clean build all version setup run mount umount
@@ -40,14 +45,19 @@ help:
 	@echo ''
 	@echo 'IssueFS Targets:'
 	@echo '  setup          Complete IssueFS setup (install deps)'
-	@echo '  run            Run the filesystem (MOUNTPOINT=/tmp/jira)'
+	@echo '  run            Run the filesystem'
 	@echo '  mount          Alias for run'
 	@echo '  umount         Unmount the filesystem'
 	@echo ''
+	@echo 'Mount Point:'
+	@echo '  Default:       /tmp/jira'
+	@echo '  From .env:     Set MOUNTPOINT=path in .env file'
+	@echo '  Command line:  make run MOUNTPOINT=/custom/path'
+	@echo ''
 	@echo 'Examples:'
 	@echo '  make setup                    # First time setup'
-	@echo '  make run                      # Mount at /tmp/jira'
-	@echo '  make run MOUNTPOINT=/mnt/jira # Mount at custom location'
+	@echo '  make run                      # Mount at default or .env location'
+	@echo '  make run MOUNTPOINT=/mnt/jira # Override with custom location'
 
 ## Install the package in development mode
 install: venv  
@@ -87,6 +97,10 @@ setup: install
 	@echo "Make sure you have a .env file with:"
 	@echo "  - JIRA_API_TOKEN (your JIRA API token)"
 	@echo "  - JIRA_URL (your JIRA instance URL)"
+	@echo ""
+	@echo "Optional .env settings:"
+	@echo "  - MOUNTPOINT (default mount location, e.g., .issuefs/mnt)"
+	@echo "  - PERSISTENT_CONFIG (where to store persistent queries)"
 	@echo ""
 
 ## Run the IssueFS filesystem
