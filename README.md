@@ -1,6 +1,8 @@
 # issuefs
 FUSE pseudo-filesystem that mounts JIRA issues as read-only files
 
+<img src="docs/Gemini_Generated_Image_Workflow_Overview.png">
+
 ## Configuration
 
 Create a `.env` file in the project root with:

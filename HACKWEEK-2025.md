@@ -1,6 +1,6 @@
 # Hackweek 2025 project
 
-FUSE filesystem representating issues (e.g. JIRA) for the use with AI agents code-assistants
+issuefs: FUSE filesystem representing issues (e.g. JIRA) for the use with AI agents code-assistants
 
 ## Background
 Creating a FUSE filesystem (issuefs) that mounts issues from various ticketing systems (Github, Jira, Bugzilla, Redmine) as files to your local file system.
@@ -11,6 +11,7 @@ And why this is good idea?
 * User can just use AI agentic capabilities from your favorite IDE to ask question about the issue, project or functionality while providing relavant tickets as context without extra work. 
 * User can use it during development of the new features when youlet the AI agent to jump start the solution based on the relevant. The issuefs will give the AI agent the context (AI agents just read few more files). No need for copying and pasting issues to user prompt or by using extra MCP tools to access the issues. These you can still do but this approach is on purpose different.
 
+<img src="docs/Gemini_Generated_Image_Workflow_Overview.png">
 
 ## User scenario #1
 * User is tasked to implement feature A in a ticket JIRA ABC-1234. This is also related to some BZ and also some upstream Github issues.
