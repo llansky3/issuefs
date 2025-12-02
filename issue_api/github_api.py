@@ -122,6 +122,38 @@ class GitHub:
             ))
         return comments
 
+    def get_issue(self, issue_number, repo, include_comments=True):
+        """
+        Get a single issue by its number.
+        
+        Args:
+            issue_number: Issue number (integer or string)
+            repo: Repository in format "owner/repo" (required)
+            include_comments: Whether to include comments (default: True)
+        
+        Returns:
+            IssueInfo_GitHub object or None if issue not found
+        """
+        try:
+            url_to_get = f'{self.url}/repos/{repo}/issues/{issue_number}'
+            result = requests.get(url_to_get, headers=self.headers(), timeout=10)
+            result.raise_for_status()
+            data = result.json()
+            
+            i = IssueInfo_GitHub(
+                data['number'],
+                data['title'],
+                data.get('body') or '',
+                github_url="https://github.com",
+                repo=repo
+            )
+            if include_comments:
+                i.comments = self.get_comments(data['number'], repo=repo)
+            return i
+        except requests.exceptions.RequestException as e:
+            print(f"Warning: Could not fetch GitHub issue #{issue_number} from {repo}: {e}")
+            return None
+
     def api(self, issue_number, repo, fields=None):
         """
         Get specific fields from a GitHub issue.

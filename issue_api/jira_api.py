@@ -69,6 +69,36 @@ class Jira:
             ))
         return comments
 
+    def get_issue(self, issue_key, include_comments=True):
+        """
+        Get a single issue by its key.
+        
+        Args:
+            issue_key: JIRA issue key (e.g., 'ABC-1234')
+            include_comments: Whether to include comments (default: True)
+        
+        Returns:
+            IssueInfo_Jira object or None if issue not found
+        """
+        try:
+            url_to_get = f'{self.url}/rest/api/2/issue/{issue_key}?fields=key,summary,description'
+            result = requests.get(url_to_get, headers=self.headers(), timeout=10)
+            result.raise_for_status()
+            data = result.json()
+            
+            i = IssueInfo_Jira(
+                data['key'],
+                data['fields']['summary'],
+                data['fields'].get('description', ''),
+                jira_url=self.url
+            )
+            if include_comments:
+                i.comments = self.get_comments(data['key'])
+            return i
+        except requests.exceptions.RequestException as e:
+            print(f"Warning: Could not fetch JIRA issue {issue_key}: {e}")
+            return None
+
     def api(self, issue, fields=['summary']):
         fields_to_get = ",".join(fields)
         url_to_get = f'{self.url}/rest/api/2/issue/{issue}?fields={fields_to_get}'

@@ -63,10 +63,14 @@ enabled: false      # Set to true to fetch issues
 persistent: false   # Set to true to save on unmount
 jira:
   - jql: ''         # JQL query string
+    issues: []      # Optional: List of specific issue keys to fetch
 github:
   - repo: ''        # Target repository in owner/repo format
     q: ''           # Issue query string
+    issues: []      # Optional: List of specific issue numbers to fetch
 ```
+
+**Note:** The `issues` attribute allows you to explicitly specify individual issues by appropriate key,or id. The query folder will then show the union of query results and explicitly specified issues. 
 
 ## Unmounting
 

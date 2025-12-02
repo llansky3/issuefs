@@ -48,8 +48,8 @@ class QueryFolder:
         self.name = name
         self.enabled = False
         self.persistent = False  # Flag to persist this query on unmount
-        self.jira_config = {'jql': ''}
-        self.github_config = {'repo': '', 'q': ''}
+        self.jira_config = {'jql': '', 'issues': []}
+        self.github_config = {'repo': '', 'q': '', 'issues': []}
         self.issues = []
         self.last_updated = 0
         
@@ -76,15 +76,25 @@ class QueryFolder:
                 jira_list = data.get('jira', [])
                 if jira_list and isinstance(jira_list, list) and len(jira_list) > 0:
                     self.jira_config = jira_list[0]
+                    # Ensure 'issues' key exists and is a list
+                    if 'issues' not in self.jira_config:
+                        self.jira_config['issues'] = []
+                    elif not isinstance(self.jira_config['issues'], list):
+                        self.jira_config['issues'] = []
                 else:
-                    self.jira_config = {'jql': ''}
+                    self.jira_config = {'jql': '', 'issues': []}
                 
                 # Load GitHub config
                 github_list = data.get('github', [])
                 if github_list and isinstance(github_list, list) and len(github_list) > 0:
                     self.github_config = github_list[0]
+                    # Ensure 'issues' key exists and is a list
+                    if 'issues' not in self.github_config:
+                        self.github_config['issues'] = []
+                    elif not isinstance(self.github_config['issues'], list):
+                        self.github_config['issues'] = []
                 else:
-                    self.github_config = {'repo': '', 'q': ''}
+                    self.github_config = {'repo': '', 'q': '', 'issues': []}
         except yaml.YAMLError as e:
             print(f"Error parsing YAML: {e}")
     
@@ -93,32 +103,78 @@ class QueryFolder:
         # Clean up
         self.issues = []
         self.last_updated = time.time()
-        # JIRA first
+        
+        # Track unique issue keys to avoid duplicates
+        seen_keys = set()
+        
+        # JIRA: Fetch issues from query
         jql = self.jira_config.get('jql', '')
         if self.enabled and jql:
             try:
-                self.issues = jira_client.search(jql)
-                self.last_updated = time.time()
-                print(f"Updated {self.name} (JIRA): found {len(self.issues)} issues")
+                query_issues = jira_client.search(jql)
+                for issue in query_issues:
+                    if issue.key not in seen_keys:
+                        self.issues.append(issue)
+                        seen_keys.add(issue.key)
+                print(f"Updated {self.name} (JIRA query): found {len(query_issues)} issues")
             except Exception as e:
                 print(f"Error fetching JIRA issues for {self.name}: {e}")
-                self.issues = []
         
-        # GitHub second
+        # JIRA: Fetch explicitly specified issues
+        jira_issues_list = self.jira_config.get('issues', [])
+        if self.enabled and jira_issues_list:
+            print(f"Fetching {len(jira_issues_list)} explicitly specified JIRA issue(s)...")
+            for issue_key in jira_issues_list:
+                if issue_key not in seen_keys:
+                    try:
+                        issue = jira_client.get_issue(issue_key)
+                        if issue:
+                            self.issues.append(issue)
+                            seen_keys.add(issue.key)
+                            print(f"  ✓ Fetched JIRA issue: {issue_key}")
+                        else:
+                            print(f"  ✗ Warning: JIRA issue {issue_key} not found or could not be fetched")
+                    except Exception as e:
+                        print(f"  ✗ Warning: Error fetching JIRA issue {issue_key}: {e}")
+                else:
+                    print(f"  - Skipped JIRA issue {issue_key} (already in results)")
+        
+        # GitHub: Fetch issues from query
         repo = self.github_config.get('repo', '')
         query = self.github_config.get('q', '')
         print(f"GitHub config: repo='{repo}', query='{query}'")
         if self.enabled and repo and query and github_client:
             try:
                 gh_issues = github_client.search(query, repo)
-                self.issues += list(gh_issues)
-                self.last_updated = time.time()
-                print(f"Updated {self.name} (GitHub): found {len(gh_issues)} issues")
+                for issue in gh_issues:
+                    if issue.key not in seen_keys:
+                        self.issues.append(issue)
+                        seen_keys.add(issue.key)
+                print(f"Updated {self.name} (GitHub query): found {len(gh_issues)} issues")
             except Exception as e:
                 print(f"Error fetching GitHub issues for {self.name}: {e}")
         
+        # GitHub: Fetch explicitly specified issues
+        github_issues_list = self.github_config.get('issues', [])
+        if self.enabled and repo and github_issues_list:
+            print(f"Fetching {len(github_issues_list)} explicitly specified GitHub issue(s)...")
+            for issue_number in github_issues_list:
+                try:
+                    issue = github_client.get_issue(issue_number, repo)
+                    if issue:
+                        if issue.key not in seen_keys:
+                            self.issues.append(issue)
+                            seen_keys.add(issue.key)
+                            print(f"  ✓ Fetched GitHub issue: #{issue_number}")
+                        else:
+                            print(f"  - Skipped GitHub issue #{issue_number} (already in results)")
+                    else:
+                        print(f"  ✗ Warning: GitHub issue #{issue_number} not found in {repo}")
+                except Exception as e:
+                    print(f"  ✗ Warning: Error fetching GitHub issue #{issue_number}: {e}")
+        
         # No valid configuration
-        if self.enabled and not jql and (not repo or not query):
+        if self.enabled and not jql and not jira_issues_list and (not repo or (not query and not github_issues_list)):
             print(f"Warning: {self.name} is enabled but has no valid JIRA or GitHub configuration")
             self.issues = []
         print(f"Final issue count for {self.name}: {len(self.issues)}")
@@ -261,8 +317,15 @@ class IssueFS(Operations):
                 folder = QueryFolder(folder_name)
                 folder.enabled = config.get('enabled', False)
                 folder.persistent = config.get('persistent', False)
-                folder.jira_config = config.get('jira_config', {'jql': ''})
-                folder.github_config = config.get('github_config', {'repo': '', 'q': ''})
+                folder.jira_config = config.get('jira_config', {'jql': '', 'issues': []})
+                folder.github_config = config.get('github_config', {'repo': '', 'q': '', 'issues': []})
+                
+                # Ensure 'issues' key exists in configs
+                if 'issues' not in folder.jira_config:
+                    folder.jira_config['issues'] = []
+                if 'issues' not in folder.github_config:
+                    folder.github_config['issues'] = []
+                
                 self.folders[folder_name] = folder
                 
                 # Display preview of config
@@ -649,28 +712,40 @@ class IssueFS(Operations):
             # Parse YAML and update configuration
             old_enabled = folder.enabled
             old_jql = folder.jira_config.get('jql', '')
+            old_jira_issues = folder.jira_config.get('issues', [])
             old_github_repo = folder.github_config.get('repo', '')
             old_github_q = folder.github_config.get('q', '')
+            old_github_issues = folder.github_config.get('issues', [])
             
             folder.from_yaml(yaml_content)
             
             new_jql = folder.jira_config.get('jql', '')
+            new_jira_issues = folder.jira_config.get('issues', [])
             new_github_repo = folder.github_config.get('repo', '')
             new_github_q = folder.github_config.get('q', '')
+            new_github_issues = folder.github_config.get('issues', [])
             
             # Check if JIRA config changed
-            jira_changed = (old_enabled != folder.enabled or old_jql != new_jql)
+            jira_changed = (old_enabled != folder.enabled or 
+                          old_jql != new_jql or 
+                          old_jira_issues != new_jira_issues)
             # Check if GitHub config changed
             github_changed = (old_enabled != folder.enabled or 
                             old_github_repo != new_github_repo or 
-                            old_github_q != new_github_q)
+                            old_github_q != new_github_q or
+                            old_github_issues != new_github_issues)
             
             # If enabled and something changed, update issues
             if folder.enabled and (jira_changed or github_changed):
-                if new_jql or (new_github_repo and new_github_q):
+                # Check if there's any valid config (query or explicit issues)
+                has_jira_config = new_jql or new_jira_issues
+                has_github_config = (new_github_repo and (new_github_q or new_github_issues))
+                
+                if has_jira_config or has_github_config:
                     print(f"Configuration changed for {folder_name}, fetching issues...")
                     folder.update_issues(self.jira, self.github)
-            elif not folder.enabled or (not new_jql and not (new_github_repo and new_github_q)):
+            elif not folder.enabled or (not new_jql and not new_jira_issues and 
+                                       not (new_github_repo and (new_github_q or new_github_issues))):
                 # Clear issues if disabled or no valid config
                 folder.issues = []
     
