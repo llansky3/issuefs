@@ -12,12 +12,13 @@ from fuse import FUSE, FuseOSError, Operations
 from dotenv import load_dotenv
 
 from issue_api.jira_api import Jira
+from issue_api.github_api import GitHub
 
 # --- SECRETS ---
 load_dotenv()
 
-jira_api_key = os.getenv('JIRA_API_TOKEN')
-if not jira_api_key:
+jira_api_token = os.getenv('JIRA_API_TOKEN')
+if not jira_api_token:
     raise ValueError('You must set JIRA_API_TOKEN environment variable in .env file before running this script!')
 
 jira_url = os.getenv('JIRA_URL')
@@ -25,7 +26,19 @@ if not jira_url:
     raise ValueError('You must set JIRA_URL environment variable in .env file before running this script!')
 
 # Initialize JIRA client at module level
-jira_client = Jira(jira_url, jira_api_key)
+jira_client = Jira(jira_url, jira_api_token)
+
+# Initialize GitHub client at module level (optional)
+github_api_token = os.getenv('GITHUB_API_TOKEN')
+if not github_api_token:
+    raise ValueError('You must set GITHUB_API_TOKEN environment variable in .env file before running this script!')
+
+github_url = os.getenv('GITHUB_URL')
+if not github_url:
+    raise ValueError('You must set GITHUB_URL environment variable in .env file before running this script!')
+
+
+github_client = GitHub(github_url, github_api_token)
 
 
 class QueryFolder:
@@ -36,6 +49,7 @@ class QueryFolder:
         self.enabled = False
         self.persistent = False  # Flag to persist this query on unmount
         self.jira_config = {'jql': ''}
+        self.github_config = {'repo': '', 'q': ''}
         self.issues = []
         self.last_updated = 0
         
@@ -45,7 +59,8 @@ class QueryFolder:
         config = {
             'enabled': self.enabled,
             'persistent': self.persistent,
-            'jira': [self.jira_config]
+            'jira': [self.jira_config],
+            'github': [self.github_config]
         }
         return yaml.dump(config, default_flow_style=False, sort_keys=False)
     
@@ -56,32 +71,59 @@ class QueryFolder:
             if data:
                 self.enabled = data.get('enabled', False)
                 self.persistent = data.get('persistent', False)
+                
+                # Load JIRA config
                 jira_list = data.get('jira', [])
                 if jira_list and isinstance(jira_list, list) and len(jira_list) > 0:
                     self.jira_config = jira_list[0]
                 else:
                     self.jira_config = {'jql': ''}
+                
+                # Load GitHub config
+                github_list = data.get('github', [])
+                if github_list and isinstance(github_list, list) and len(github_list) > 0:
+                    self.github_config = github_list[0]
+                else:
+                    self.github_config = {'repo': '', 'q': ''}
         except yaml.YAMLError as e:
             print(f"Error parsing YAML: {e}")
     
-    def update_issues(self, jira_client):
-        """Fetch issues from JIRA if enabled."""
+    def update_issues(self, jira_client, github_client):
+        """Fetch issues from JIRA and GitHub if enabled."""
+        # JIRA first
         jql = self.jira_config.get('jql', '')
         if self.enabled and jql:
             try:
                 self.issues = jira_client.search(jql)
                 self.last_updated = time.time()
-                print(f"Updated {self.name}: found {len(self.issues)} issues")
+                print(f"Updated {self.name} (JIRA): found {len(self.issues)} issues")
             except Exception as e:
-                print(f"Error fetching issues for {self.name}: {e}")
+                print(f"Error fetching JIRA issues for {self.name}: {e}")
                 self.issues = []
-        else:
+        
+        # GitHub second
+        repo = self.github_config.get('repo', '')
+        query = self.github_config.get('q', '')
+        print(f"GitHub config: repo='{repo}', query='{query}'")
+        if self.enabled and repo and query and github_client:
+            try:
+                gh_issues = github_client.search(query, repo)
+                self.issues += list(gh_issues)
+                self.last_updated = time.time()
+                print(f"Updated {self.name} (GitHub): found {len(gh_issues)} issues")
+            except Exception as e:
+                print(f"Error fetching GitHub issues for {self.name}: {e}")
+        
+        # No valid configuration
+        if self.enabled and not jql and (not repo or not query):
+            print(f"Warning: {self.name} is enabled but has no valid JIRA or GitHub configuration")
             self.issues = []
+        print(f"Final issue count for {self.name}: {len(self.issues)}")
+        return
 
-
-class JiraFS(Operations):
+class IssueFS(Operations):
     """
-    FUSE filesystem that mounts JIRA issues as files.
+    FUSE filesystem that mounts issues from JIRA and GitHub as files.
     
     Structure:
     /
@@ -94,8 +136,9 @@ class JiraFS(Operations):
         └── ...
     """
     
-    def __init__(self, jira_client, mountpoint, config_file=None):
+    def __init__(self, jira_client, github_client, mountpoint, config_file=None):
         self.jira = jira_client
+        self.github = github_client
         self.folders = {}  # folder_name -> QueryFolder
         self.file_handles = {}  # path -> content
         self.now = time.time()
@@ -125,16 +168,29 @@ class JiraFS(Operations):
         
         # Fetch JIRA version info at startup
         print("Testing JIRA connection...")
-        self.version_info = jira_client.version()
-        if self.version_info.get('success'):
-            print(f"✓ Connected to {self.version_info.get('server_title', 'JIRA')}")
-            print(f"✓ Version: {self.version_info['version']}")
-            print(f"✓ Base URL: {self.version_info['base_url']}")
+        self.jira_version_info = jira_client.version()
+        if self.jira_version_info.get('success'):
+            print(f"✓ Connected to {self.jira_version_info.get('server_title', 'JIRA')}")
+            print(f"✓ Version: {self.jira_version_info['version']}")
+            print(f"✓ Base URL: {self.jira_version_info['base_url']}")
         else:
-            print(f"✗ Warning: Could not connect to JIRA: {self.version_info.get('error', 'Unknown error')}")
-            print("  Filesystem will still mount, but queries may fail.")
+            print(f"✗ Warning: Could not connect to JIRA: {self.jira_version_info.get('error', 'Unknown error')}")
+            print("  Filesystem will still mount, but JIRA queries may fail.")
         print()
         
+        # Test GitHub connection if client is available
+        print("Testing GitHub connection...")
+        self.github_version_info = github_client.version()
+        if self.github_version_info.get('success'):
+            print(f"✓ Connected to {self.github_version_info.get('server_title', 'GitHub')}")
+            print(f"✓ Version: {self.github_version_info['version']}")
+            print(f"✓ Authenticated as: {self.github_version_info.get('authenticated_user', 'unknown')}")
+            print(f"✓ Base URL: {self.github_version_info['url']}")
+        else:
+            print(f"✗ Warning: Could not connect to GitHub: {self.github_version_info.get('error', 'Unknown error')}")
+            print("  Filesystem will still mount, but GitHub queries may fail.")
+        print()
+       
         # Register cleanup handler for saving config on exit
         atexit.register(self._save_config)
         
@@ -154,6 +210,9 @@ class JiraFS(Operations):
             "#           persistent: true",
             "#           jira_config:",
             "#             jql: 'your JQL query'",
+            "#           github_config:",
+            "#             repo: 'owner/repo'",
+            "#             q: 'your GitHub search query'",
             "#",
             "# This file is automatically managed by issuefs.",
             "# Manual editing is supported but be careful with YAML syntax.",
@@ -200,16 +259,29 @@ class JiraFS(Operations):
                 folder.enabled = config.get('enabled', False)
                 folder.persistent = config.get('persistent', False)
                 folder.jira_config = config.get('jira_config', {'jql': ''})
+                folder.github_config = config.get('github_config', {'repo': '', 'q': ''})
                 self.folders[folder_name] = folder
                 
+                # Display preview of config
                 jql_preview = folder.jira_config.get('jql', '')[:50]
                 if len(folder.jira_config.get('jql', '')) > 50:
                     jql_preview += '...'
-                print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, jql='{jql_preview}')")
                 
-                # Fetch issues if enabled and has JQL
-                if folder.enabled and folder.jira_config.get('jql'):
-                    folder.update_issues(self.jira)
+                github_repo = folder.github_config.get('repo', '')
+                github_q = folder.github_config.get('q', '')[:30]
+                if len(folder.github_config.get('q', '')) > 30:
+                    github_q += '...'
+                
+                if jql_preview:
+                    print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, jql='{jql_preview}')")
+                elif github_repo:
+                    print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, github={github_repo}, q='{github_q}')")
+                else:
+                    print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, no query)")
+                
+                # Fetch issues if enabled
+                if folder.enabled:
+                    folder.update_issues(self.jira, self.github)
                     
         except yaml.YAMLError as e:
             print(f"Error parsing config file: {e}")
@@ -223,7 +295,8 @@ class JiraFS(Operations):
             name: {
                 'enabled': folder.enabled,
                 'persistent': folder.persistent,
-                'jira_config': folder.jira_config
+                'jira_config': folder.jira_config,
+                'github_config': folder.github_config
             }
             for name, folder in self.folders.items()
             if folder.persistent
@@ -561,15 +634,29 @@ class JiraFS(Operations):
             # Parse YAML and update configuration
             old_enabled = folder.enabled
             old_jql = folder.jira_config.get('jql', '')
-            folder.from_yaml(yaml_content)
-            new_jql = folder.jira_config.get('jql', '')
+            old_github_repo = folder.github_config.get('repo', '')
+            old_github_q = folder.github_config.get('q', '')
             
-            # If enabled or JQL changed, update issues
-            if folder.enabled and new_jql and (old_enabled != folder.enabled or old_jql != new_jql):
-                print(f"Configuration changed for {folder_name}, fetching issues...")
-                folder.update_issues(self.jira)
-            elif not folder.enabled or not new_jql:
-                # Clear issues if disabled or jql is empty
+            folder.from_yaml(yaml_content)
+            
+            new_jql = folder.jira_config.get('jql', '')
+            new_github_repo = folder.github_config.get('repo', '')
+            new_github_q = folder.github_config.get('q', '')
+            
+            # Check if JIRA config changed
+            jira_changed = (old_enabled != folder.enabled or old_jql != new_jql)
+            # Check if GitHub config changed
+            github_changed = (old_enabled != folder.enabled or 
+                            old_github_repo != new_github_repo or 
+                            old_github_q != new_github_q)
+            
+            # If enabled and something changed, update issues
+            if folder.enabled and (jira_changed or github_changed):
+                if new_jql or (new_github_repo and new_github_q):
+                    print(f"Configuration changed for {folder_name}, fetching issues...")
+                    folder.update_issues(self.jira, self.github)
+            elif not folder.enabled or (not new_jql and not (new_github_repo and new_github_q)):
+                # Clear issues if disabled or no valid config
                 folder.issues = []
     
     def release(self, path, fh):
@@ -585,7 +672,7 @@ class JiraFS(Operations):
 
 def main(mountpoint):
     """
-    Main function to run the JIRA FUSE filesystem.
+    Main function to run the IssueFS FUSE filesystem.
     """
     # Ensure the mountpoint directory exists
     if not os.path.isdir(mountpoint):
@@ -596,7 +683,7 @@ def main(mountpoint):
     print(f"Connecting to JIRA at: {jira_url}")
     
     # Create and mount filesystem
-    print(f"Mounting JiraFS filesystem to: {mountpoint}")
+    print(f"Mounting IssueFS filesystem to: {mountpoint}")
     print("Usage:")
     print("  1. Create a folder: mkdir <mountpoint>/my_query")
     print("  2. Edit config: vi <mountpoint>/my_query/config.yaml")
@@ -608,7 +695,7 @@ def main(mountpoint):
     print("  4. Issues will appear as .txt files in the folder")
     print("\nPress Ctrl+C to unmount\n")
     
-    FUSE(JiraFS(jira_client, mountpoint), mountpoint, foreground=True, allow_other=False)
+    FUSE(IssueFS(jira_client, github_client, mountpoint), mountpoint, foreground=True, allow_other=False)
     print(f"Filesystem unmounted from: {mountpoint}")
 
 
