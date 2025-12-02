@@ -90,6 +90,9 @@ class QueryFolder:
     
     def update_issues(self, jira_client, github_client):
         """Fetch issues from JIRA and GitHub if enabled."""
+        # Clean up
+        self.issues = []
+        self.last_updated = time.time()
         # JIRA first
         jql = self.jira_config.get('jql', '')
         if self.enabled and jql:
@@ -379,24 +382,36 @@ class IssueFS(Operations):
     
     def _get_root_version_content(self):
         """Generate content for version.txt file at root."""
-        if not self.version_info:
+        if not self.jira_version_info and not self.github_version_info:
             return "No version information available"
         
-        version_info = self.version_info
+        lines = []
+        version_info = self.jira_version_info
+        lines.append(f"JIRA Server Information")
+        lines.append(f"=" * 40)
         if version_info.get('success'):
-            lines = []
-            lines.append(f"JIRA Server Information")
-            lines.append(f"=" * 40)
             lines.append(f"Server: {version_info.get('server_title', 'JIRA')}")
             lines.append(f"Version: {version_info.get('version', 'unknown')}")
-            lines.append(f"Build: {version_info.get('build', 'unknown')}")
             lines.append(f"Base URL: {version_info.get('base_url', 'unknown')}")
             lines.append(f"")
-            lines.append(f"Connection tested at mount time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.now))}")
-            return "\n".join(lines)
         else:
-            return f"Error getting version: {version_info.get('error', 'Unknown error')}"
-    
+            lines.append(f"Error getting version: {version_info.get('error', 'Unknown error')}")
+
+        version_info = self.github_version_info
+        lines.append(f"Github Server Information")
+        lines.append(f"=" * 40)
+        if version_info.get('success'):
+            lines.append(f"Server: {version_info.get('server_title', 'Github')}")
+            lines.append(f"Version: {version_info.get('version', 'unknown')}")
+            lines.append(f"Base URL: {version_info.get('url', 'unknown')}")
+            lines.append(f"")
+        else:
+            lines.append(f"Error getting version: {version_info.get('error', 'Unknown error')}")
+
+        lines.append(f"Connections tested at mount time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.now))}")
+        return "\n".join(lines)
+
+
     def getattr(self, path, fh=None):
         """Get file attributes."""
         now = int(self.now)

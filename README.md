@@ -1,5 +1,5 @@
 # issuefs
-FUSE pseudo-filesystem that mounts JIRA issues as read-only files
+FUSE pseudo-filesystem that mounts JIRA and Github issues as read-only files
 
 <img src="docs/Gemini_Generated_Image_Workflow_Overview.png">
 
@@ -10,6 +10,9 @@ Create a `.env` file in the project root with:
 ```
 JIRA_API_TOKEN=your_token_here
 JIRA_URL=https://your-jira-instance.com
+
+GITHUB_API_TOKEN=your_token_here
+GITHUB_URL=https:/api.github.com
 
 # Optional: Default mount point for the filesystem
 # MOUNTPOINT=.issuefs/mnt
@@ -59,7 +62,10 @@ Each query folder contains a `config.yaml` file with following format:
 enabled: false      # Set to true to fetch issues
 persistent: false   # Set to true to save on unmount
 jira:
-  - jql: ''         # Your JQL query string
+  - jql: ''         # JQL query string
+github:
+  - repo: ''        # Target repository in owner/repo format
+    q: ''           # Issue query string
 ```
 
 ## Unmounting
