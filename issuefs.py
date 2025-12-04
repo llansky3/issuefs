@@ -13,32 +13,44 @@ from dotenv import load_dotenv
 
 from issue_api.jira_api import Jira
 from issue_api.github_api import GitHub
+from issue_api.bugzilla_api import Bugzilla
 
 # --- SECRETS ---
 load_dotenv()
 
+# Initialize all available clients
+clients = {}
+
+# JIRA client
 jira_api_token = os.getenv('JIRA_API_TOKEN')
-if not jira_api_token:
-    raise ValueError('You must set JIRA_API_TOKEN environment variable in .env file before running this script!')
-
 jira_url = os.getenv('JIRA_URL')
-if not jira_url:
-    raise ValueError('You must set JIRA_URL environment variable in .env file before running this script!')
+if jira_api_token and jira_url:
+    clients['jira'] = Jira(jira_url, jira_api_token)
+    print(f"✓ JIRA client initialized")
+else:
+    print("⚠ JIRA client not configured (JIRA_API_TOKEN and JIRA_URL required)")
 
-# Initialize JIRA client at module level
-jira_client = Jira(jira_url, jira_api_token)
-
-# Initialize GitHub client at module level (optional)
+# GitHub client
 github_api_token = os.getenv('GITHUB_API_TOKEN')
-if not github_api_token:
-    raise ValueError('You must set GITHUB_API_TOKEN environment variable in .env file before running this script!')
-
 github_url = os.getenv('GITHUB_URL')
-if not github_url:
-    raise ValueError('You must set GITHUB_URL environment variable in .env file before running this script!')
+if github_api_token and github_url:
+    clients['github'] = GitHub(github_url, github_api_token)
+    print(f"✓ GitHub client initialized")
+else:
+    print("⚠ GitHub client not configured (GITHUB_API_TOKEN and GITHUB_URL required)")
 
+# Bugzilla client
+bugzilla_api_token = os.getenv('BUGZILLA_API_TOKEN')
+bugzilla_url = os.getenv('BUGZILLA_URL')
+if bugzilla_api_token and bugzilla_url:
+    clients['bugzilla'] = Bugzilla(bugzilla_url, bugzilla_api_token)
+    print(f"✓ Bugzilla client initialized")
+else:
+    print("⚠ Bugzilla client not configured (BUGZILLA_API_TOKEN and BUGZILLA_URL required)")
 
-github_client = GitHub(github_url, github_api_token)
+# Legacy support - keep old variable names for backward compatibility
+jira_client = clients.get('jira')
+github_client = clients.get('github')
 
 
 class QueryFolder:
@@ -50,6 +62,7 @@ class QueryFolder:
         self.persistent = False  # Flag to persist this query on unmount
         self.jira_config = {'jql': '', 'issues': []}
         self.github_config = {'repo': '', 'q': '', 'issues': []}
+        self.bugzilla_config = {'query': '', 'issues': []}
         self.issues = []
         self.last_updated = 0
         
@@ -60,7 +73,8 @@ class QueryFolder:
             'enabled': self.enabled,
             'persistent': self.persistent,
             'jira': [self.jira_config],
-            'github': [self.github_config]
+            'github': [self.github_config],
+            'bugzilla': [self.bugzilla_config]
         }
         return yaml.dump(config, default_flow_style=False, sort_keys=False)
     
@@ -95,11 +109,23 @@ class QueryFolder:
                         self.github_config['issues'] = []
                 else:
                     self.github_config = {'repo': '', 'q': '', 'issues': []}
+                
+                # Load Bugzilla config
+                bugzilla_list = data.get('bugzilla', [])
+                if bugzilla_list and isinstance(bugzilla_list, list) and len(bugzilla_list) > 0:
+                    self.bugzilla_config = bugzilla_list[0]
+                    # Ensure 'issues' key exists and is a list
+                    if 'issues' not in self.bugzilla_config:
+                        self.bugzilla_config['issues'] = []
+                    elif not isinstance(self.bugzilla_config['issues'], list):
+                        self.bugzilla_config['issues'] = []
+                else:
+                    self.bugzilla_config = {'query': '', 'issues': []}
         except yaml.YAMLError as e:
             print(f"Error parsing YAML: {e}")
     
-    def update_issues(self, jira_client, github_client):
-        """Fetch issues from JIRA and GitHub if enabled."""
+    def update_issues(self, clients_dict):
+        """Fetch issues from all configured trackers if enabled."""
         # Clean up
         self.issues = []
         self.last_updated = time.time()
@@ -107,82 +133,135 @@ class QueryFolder:
         # Track unique issue keys to avoid duplicates
         seen_keys = set()
         
-        # JIRA: Fetch issues from query
-        jql = self.jira_config.get('jql', '')
-        if self.enabled and jql:
-            try:
-                query_issues = jira_client.search(jql)
-                for issue in query_issues:
-                    if issue.key not in seen_keys:
-                        self.issues.append(issue)
-                        seen_keys.add(issue.key)
-                print(f"Updated {self.name} (JIRA query): found {len(query_issues)} issues")
-            except Exception as e:
-                print(f"Error fetching JIRA issues for {self.name}: {e}")
+        if not self.enabled:
+            return
         
-        # JIRA: Fetch explicitly specified issues
-        jira_issues_list = self.jira_config.get('issues', [])
-        if self.enabled and jira_issues_list:
-            print(f"Fetching {len(jira_issues_list)} explicitly specified JIRA issue(s)...")
-            for issue_key in jira_issues_list:
-                if issue_key not in seen_keys:
+        # Define tracker configurations
+        tracker_configs = [
+            {
+                'name': 'jira',
+                'client': clients_dict.get('jira'),
+                'config': self.jira_config,
+                'query_key': 'jql',
+                'issues_key': 'issues',
+                'search_method': lambda client, query: client.search(query),
+                'get_issue_method': lambda client, issue_id: client.get_issue(issue_id),
+            },
+            {
+                'name': 'github',
+                'client': clients_dict.get('github'),
+                'config': self.github_config,
+                'query_key': 'q',
+                'issues_key': 'issues',
+                'repo_key': 'repo',
+                'search_method': lambda client, query, repo: client.search(query, repo),
+                'get_issue_method': lambda client, issue_id, repo: client.get_issue(issue_id, repo),
+            },
+            {
+                'name': 'bugzilla',
+                'client': clients_dict.get('bugzilla'),
+                'config': self.bugzilla_config,
+                'query_key': 'query',
+                'issues_key': 'issues',
+                'search_method': lambda client, query: client.search(query),
+                'get_issue_method': lambda client, issue_id: client.get_issue(issue_id),
+            }
+        ]
+        
+        # Process each tracker
+        for tracker in tracker_configs:
+            client = tracker['client']
+            if not client:
+                continue
+            
+            config = tracker['config']
+            tracker_name = tracker['name'].upper()
+            
+            # Fetch issues from query
+            query = config.get(tracker['query_key'], '')
+            
+            # For GitHub, also check if repo is configured
+            if tracker_name == 'GITHUB':
+                repo = config.get(tracker.get('repo_key', ''), '')
+                if query and repo:
                     try:
-                        issue = jira_client.get_issue(issue_key)
-                        if issue:
-                            self.issues.append(issue)
-                            seen_keys.add(issue.key)
-                            print(f"  ✓ Fetched JIRA issue: {issue_key}")
-                        else:
-                            print(f"  ✗ Warning: JIRA issue {issue_key} not found or could not be fetched")
+                        query_issues = tracker['search_method'](client, query, repo)
+                        for issue in query_issues:
+                            if issue.key not in seen_keys:
+                                self.issues.append(issue)
+                                seen_keys.add(issue.key)
+                        print(f"Updated {self.name} ({tracker_name} query): found {len(query_issues)} issues")
                     except Exception as e:
-                        print(f"  ✗ Warning: Error fetching JIRA issue {issue_key}: {e}")
-                else:
-                    print(f"  - Skipped JIRA issue {issue_key} (already in results)")
-        
-        # GitHub: Fetch issues from query
-        repo = self.github_config.get('repo', '')
-        query = self.github_config.get('q', '')
-        print(f"GitHub config: repo='{repo}', query='{query}'")
-        if self.enabled and repo and query and github_client:
-            try:
-                gh_issues = github_client.search(query, repo)
-                for issue in gh_issues:
-                    if issue.key not in seen_keys:
-                        self.issues.append(issue)
-                        seen_keys.add(issue.key)
-                print(f"Updated {self.name} (GitHub query): found {len(gh_issues)} issues")
-            except Exception as e:
-                print(f"Error fetching GitHub issues for {self.name}: {e}")
-        
-        # GitHub: Fetch explicitly specified issues
-        github_issues_list = self.github_config.get('issues', [])
-        if self.enabled and repo and github_issues_list:
-            print(f"Fetching {len(github_issues_list)} explicitly specified GitHub issue(s)...")
-            for issue_number in github_issues_list:
-                try:
-                    issue = github_client.get_issue(issue_number, repo)
-                    if issue:
-                        if issue.key not in seen_keys:
-                            self.issues.append(issue)
-                            seen_keys.add(issue.key)
-                            print(f"  ✓ Fetched GitHub issue: #{issue_number}")
-                        else:
-                            print(f"  - Skipped GitHub issue #{issue_number} (already in results)")
+                        print(f"Error fetching {tracker_name} issues for {self.name}: {e}")
+            else:
+                # For JIRA and Bugzilla
+                if query:
+                    try:
+                        query_issues = tracker['search_method'](client, query)
+                        for issue in query_issues:
+                            if issue.key not in seen_keys:
+                                self.issues.append(issue)
+                                seen_keys.add(issue.key)
+                        print(f"Updated {self.name} ({tracker_name} query): found {len(query_issues)} issues")
+                    except Exception as e:
+                        print(f"Error fetching {tracker_name} issues for {self.name}: {e}")
+            
+            # Fetch explicitly specified issues
+            issues_list = config.get(tracker['issues_key'], [])
+            if issues_list:
+                print(f"Fetching {len(issues_list)} explicitly specified {tracker_name} issue(s)...")
+                for issue_id in issues_list:
+                    if issue_id not in seen_keys:
+                        try:
+                            # Special handling for GitHub which needs repo
+                            if tracker_name == 'GITHUB':
+                                repo = config.get(tracker.get('repo_key', ''), '')
+                                if repo:
+                                    issue = tracker['get_issue_method'](client, issue_id, repo)
+                                else:
+                                    print(f"  ✗ Warning: Cannot fetch {tracker_name} issue {issue_id} - no repo configured")
+                                    continue
+                            else:
+                                issue = tracker['get_issue_method'](client, issue_id)
+                            
+                            if issue:
+                                self.issues.append(issue)
+                                seen_keys.add(issue.key)
+                                print(f"  ✓ Fetched {tracker_name} issue: {issue_id}")
+                            else:
+                                print(f"  ✗ Warning: {tracker_name} issue {issue_id} not found or could not be fetched")
+                        except Exception as e:
+                            print(f"  ✗ Warning: Error fetching {tracker_name} issue {issue_id}: {e}")
                     else:
-                        print(f"  ✗ Warning: GitHub issue #{issue_number} not found in {repo}")
-                except Exception as e:
-                    print(f"  ✗ Warning: Error fetching GitHub issue #{issue_number}: {e}")
+                        print(f"  - Skipped {tracker_name} issue {issue_id} (already in results)")
         
-        # No valid configuration
-        if self.enabled and not jql and not jira_issues_list and (not repo or (not query and not github_issues_list)):
-            print(f"Warning: {self.name} is enabled but has no valid JIRA or GitHub configuration")
+        # Check if we have any valid configuration
+        has_valid_config = False
+        for tracker in tracker_configs:
+            config = tracker['config']
+            query = config.get(tracker['query_key'], '')
+            issues_list = config.get(tracker['issues_key'], [])
+            
+            if tracker['name'] == 'github':
+                repo = config.get(tracker.get('repo_key', ''), '')
+                if (query and repo) or (repo and issues_list):
+                    has_valid_config = True
+                    break
+            else:
+                if query or issues_list:
+                    has_valid_config = True
+                    break
+        
+        if not has_valid_config:
+            print(f"Warning: {self.name} is enabled but has no valid configuration")
             self.issues = []
+        
         print(f"Final issue count for {self.name}: {len(self.issues)}")
         return
 
 class IssueFS(Operations):
     """
-    FUSE filesystem that mounts issues from JIRA and GitHub as files.
+    FUSE filesystem that mounts issues from JIRA, GitHub, and Bugzilla as files.
     
     Structure:
     /
@@ -195,9 +274,13 @@ class IssueFS(Operations):
         └── ...
     """
     
-    def __init__(self, jira_client, github_client, mountpoint, config_file=None):
-        self.jira = jira_client
-        self.github = github_client
+    def __init__(self, clients_dict, mountpoint, config_file=None):
+        self.clients = clients_dict
+        # Legacy attributes for backward compatibility
+        self.jira = clients_dict.get('jira')
+        self.github = clients_dict.get('github')
+        self.bugzilla = clients_dict.get('bugzilla')
+        
         self.folders = {}  # folder_name -> QueryFolder
         self.file_handles = {}  # path -> content
         self.now = time.time()
@@ -225,30 +308,27 @@ class IssueFS(Operations):
         # Load persistent configurations for this mountpoint
         self._load_config()
         
-        # Fetch JIRA version info at startup
-        print("Testing JIRA connection...")
-        self.jira_version_info = jira_client.version()
-        if self.jira_version_info.get('success'):
-            print(f"✓ Connected to {self.jira_version_info.get('server_title', 'JIRA')}")
-            print(f"✓ Version: {self.jira_version_info['version']}")
-            print(f"✓ Base URL: {self.jira_version_info['base_url']}")
-        else:
-            print(f"✗ Warning: Could not connect to JIRA: {self.jira_version_info.get('error', 'Unknown error')}")
-            print("  Filesystem will still mount, but JIRA queries may fail.")
-        print()
-        
-        # Test GitHub connection if client is available
-        print("Testing GitHub connection...")
-        self.github_version_info = github_client.version()
-        if self.github_version_info.get('success'):
-            print(f"✓ Connected to {self.github_version_info.get('server_title', 'GitHub')}")
-            print(f"✓ Version: {self.github_version_info['version']}")
-            print(f"✓ Authenticated as: {self.github_version_info.get('authenticated_user', 'unknown')}")
-            print(f"✓ Base URL: {self.github_version_info['url']}")
-        else:
-            print(f"✗ Warning: Could not connect to GitHub: {self.github_version_info.get('error', 'Unknown error')}")
-            print("  Filesystem will still mount, but GitHub queries may fail.")
-        print()
+        # Test connections for all available clients
+        self.version_info = {}
+        for client_name, client in self.clients.items():
+            if client:
+                print(f"Testing {client_name.upper()} connection...")
+                version_info = client.version()
+                self.version_info[client_name] = version_info
+                
+                if version_info.get('success'):
+                    print(f"✓ Connected to {version_info.get('server_title', client_name.upper())}")
+                    print(f"✓ Version: {version_info.get('version', 'unknown')}")
+                    if 'base_url' in version_info:
+                        print(f"✓ Base URL: {version_info['base_url']}")
+                    if 'url' in version_info:
+                        print(f"✓ Base URL: {version_info['url']}")
+                    if 'authenticated_user' in version_info:
+                        print(f"✓ Authenticated as: {version_info['authenticated_user']}")
+                else:
+                    print(f"✗ Warning: Could not connect to {client_name.upper()}: {version_info.get('error', 'Unknown error')}")
+                    print(f"  Filesystem will still mount, but {client_name.upper()} queries may fail.")
+                print()
        
         # Register cleanup handler for saving config on exit
         atexit.register(self._save_config)
@@ -269,9 +349,14 @@ class IssueFS(Operations):
             "#           persistent: true",
             "#           jira_config:",
             "#             jql: 'your JQL query'",
+            "#             issues: []",
             "#           github_config:",
             "#             repo: 'owner/repo'",
             "#             q: 'your GitHub search query'",
+            "#             issues: []",
+            "#           bugzilla_config:",
+            "#             query: 'your Bugzilla search query'",
+            "#             issues: []",
             "#",
             "# This file is automatically managed by issuefs.",
             "# Manual editing is supported but be careful with YAML syntax.",
@@ -319,12 +404,15 @@ class IssueFS(Operations):
                 folder.persistent = config.get('persistent', False)
                 folder.jira_config = config.get('jira_config', {'jql': '', 'issues': []})
                 folder.github_config = config.get('github_config', {'repo': '', 'q': '', 'issues': []})
+                folder.bugzilla_config = config.get('bugzilla_config', {'query': '', 'issues': []})
                 
                 # Ensure 'issues' key exists in configs
                 if 'issues' not in folder.jira_config:
                     folder.jira_config['issues'] = []
                 if 'issues' not in folder.github_config:
                     folder.github_config['issues'] = []
+                if 'issues' not in folder.bugzilla_config:
+                    folder.bugzilla_config['issues'] = []
                 
                 self.folders[folder_name] = folder
                 
@@ -338,16 +426,22 @@ class IssueFS(Operations):
                 if len(folder.github_config.get('q', '')) > 30:
                     github_q += '...'
                 
+                bugzilla_query = folder.bugzilla_config.get('query', '')[:30]
+                if len(folder.bugzilla_config.get('query', '')) > 30:
+                    bugzilla_query += '...'
+                
                 if jql_preview:
                     print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, jql='{jql_preview}')")
                 elif github_repo:
                     print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, github={github_repo}, q='{github_q}')")
+                elif bugzilla_query:
+                    print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, bugzilla query='{bugzilla_query}')")
                 else:
                     print(f"  ✓ Loaded: {folder_name} (enabled={folder.enabled}, no query)")
                 
                 # Fetch issues if enabled
                 if folder.enabled:
-                    folder.update_issues(self.jira, self.github)
+                    folder.update_issues(self.clients)
                     
         except yaml.YAMLError as e:
             print(f"Error parsing config file: {e}")
@@ -362,7 +456,8 @@ class IssueFS(Operations):
                 'enabled': folder.enabled,
                 'persistent': folder.persistent,
                 'jira_config': folder.jira_config,
-                'github_config': folder.github_config
+                'github_config': folder.github_config,
+                'bugzilla_config': folder.bugzilla_config
             }
             for name, folder in self.folders.items()
             if folder.persistent
@@ -445,32 +540,44 @@ class IssueFS(Operations):
     
     def _get_root_version_content(self):
         """Generate content for version.txt file at root."""
-        if not self.jira_version_info and not self.github_version_info:
+        if not self.version_info:
             return "No version information available"
         
         lines = []
-        version_info = self.jira_version_info
-        lines.append(f"JIRA Server Information")
-        lines.append(f"=" * 40)
-        if version_info.get('success'):
-            lines.append(f"Server: {version_info.get('server_title', 'JIRA')}")
-            lines.append(f"Version: {version_info.get('version', 'unknown')}")
-            lines.append(f"Base URL: {version_info.get('base_url', 'unknown')}")
-            lines.append(f"")
-        else:
-            lines.append(f"Error getting version: {version_info.get('error', 'Unknown error')}")
-
-        version_info = self.github_version_info
-        lines.append(f"Github Server Information")
-        lines.append(f"=" * 40)
-        if version_info.get('success'):
-            lines.append(f"Server: {version_info.get('server_title', 'Github')}")
-            lines.append(f"Version: {version_info.get('version', 'unknown')}")
-            lines.append(f"Base URL: {version_info.get('url', 'unknown')}")
-            lines.append(f"")
-        else:
-            lines.append(f"Error getting version: {version_info.get('error', 'Unknown error')}")
-
+        
+        # Map of client names to display names
+        client_display_names = {
+            'jira': 'JIRA',
+            'github': 'GitHub',
+            'bugzilla': 'Bugzilla'
+        }
+        
+        for client_name in ['jira', 'github', 'bugzilla']:
+            if client_name not in self.version_info:
+                continue
+            
+            version_info = self.version_info[client_name]
+            display_name = client_display_names.get(client_name, client_name.upper())
+            
+            lines.append(f"{display_name} Server Information")
+            lines.append(f"=" * 40)
+            
+            if version_info.get('success'):
+                lines.append(f"Server: {version_info.get('server_title', display_name)}")
+                lines.append(f"Version: {version_info.get('version', 'unknown')}")
+                
+                if 'base_url' in version_info:
+                    lines.append(f"Base URL: {version_info['base_url']}")
+                if 'url' in version_info:
+                    lines.append(f"Base URL: {version_info['url']}")
+                if 'authenticated_user' in version_info:
+                    lines.append(f"Authenticated as: {version_info['authenticated_user']}")
+                
+                lines.append("")
+            else:
+                lines.append(f"Error: {version_info.get('error', 'Unknown error')}")
+                lines.append("")
+        
         lines.append(f"Connections tested at mount time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.now))}")
         return "\n".join(lines)
 
@@ -709,43 +816,52 @@ class IssueFS(Operations):
             yaml_content = bytes(self.file_handles[path]).decode('utf-8')
             folder = self.folders[folder_name]
             
-            # Parse YAML and update configuration
+            # Store old configuration
             old_enabled = folder.enabled
             old_jql = folder.jira_config.get('jql', '')
             old_jira_issues = folder.jira_config.get('issues', [])
             old_github_repo = folder.github_config.get('repo', '')
             old_github_q = folder.github_config.get('q', '')
             old_github_issues = folder.github_config.get('issues', [])
+            old_bugzilla_query = folder.bugzilla_config.get('query', '')
+            old_bugzilla_issues = folder.bugzilla_config.get('issues', [])
             
             folder.from_yaml(yaml_content)
             
+            # Get new configuration
             new_jql = folder.jira_config.get('jql', '')
             new_jira_issues = folder.jira_config.get('issues', [])
             new_github_repo = folder.github_config.get('repo', '')
             new_github_q = folder.github_config.get('q', '')
             new_github_issues = folder.github_config.get('issues', [])
+            new_bugzilla_query = folder.bugzilla_config.get('query', '')
+            new_bugzilla_issues = folder.bugzilla_config.get('issues', [])
             
-            # Check if JIRA config changed
-            jira_changed = (old_enabled != folder.enabled or 
-                          old_jql != new_jql or 
-                          old_jira_issues != new_jira_issues)
-            # Check if GitHub config changed
-            github_changed = (old_enabled != folder.enabled or 
-                            old_github_repo != new_github_repo or 
-                            old_github_q != new_github_q or
-                            old_github_issues != new_github_issues)
+            # Check if any config changed
+            config_changed = (
+                old_enabled != folder.enabled or 
+                old_jql != new_jql or 
+                old_jira_issues != new_jira_issues or
+                old_github_repo != new_github_repo or 
+                old_github_q != new_github_q or
+                old_github_issues != new_github_issues or
+                old_bugzilla_query != new_bugzilla_query or
+                old_bugzilla_issues != new_bugzilla_issues
+            )
             
             # If enabled and something changed, update issues
-            if folder.enabled and (jira_changed or github_changed):
+            if folder.enabled and config_changed:
                 # Check if there's any valid config (query or explicit issues)
                 has_jira_config = new_jql or new_jira_issues
                 has_github_config = (new_github_repo and (new_github_q or new_github_issues))
+                has_bugzilla_config = new_bugzilla_query or new_bugzilla_issues
                 
-                if has_jira_config or has_github_config:
+                if has_jira_config or has_github_config or has_bugzilla_config:
                     print(f"Configuration changed for {folder_name}, fetching issues...")
-                    folder.update_issues(self.jira, self.github)
-            elif not folder.enabled or (not new_jql and not new_jira_issues and 
-                                       not (new_github_repo and (new_github_q or new_github_issues))):
+                    folder.update_issues(self.clients)
+            elif not folder.enabled or not (new_jql or new_jira_issues or 
+                                           (new_github_repo and (new_github_q or new_github_issues)) or
+                                           new_bugzilla_query or new_bugzilla_issues):
                 # Clear issues if disabled or no valid config
                 folder.issues = []
     
@@ -769,9 +885,6 @@ def main(mountpoint):
         print(f"Mountpoint directory '{mountpoint}' does not exist. Creating it.")
         os.makedirs(mountpoint)
     
-    # Use the global JIRA client
-    print(f"Connecting to JIRA at: {jira_url}")
-    
     # Create and mount filesystem
     print(f"Mounting IssueFS filesystem to: {mountpoint}")
     print("Usage:")
@@ -782,10 +895,15 @@ def main(mountpoint):
     print("     persistent: true  # Set to true to save on unmount")
     print("     jira:")
     print("       - jql: 'your JQL query'")
+    print("     github:")
+    print("       - repo: 'owner/repo'")
+    print("         q: 'your GitHub search query'")
+    print("     bugzilla:")
+    print("       - query: 'your Bugzilla search query'")
     print("  4. Issues will appear as .txt files in the folder")
     print("\nPress Ctrl+C to unmount\n")
     
-    FUSE(IssueFS(jira_client, github_client, mountpoint), mountpoint, foreground=True, allow_other=False)
+    FUSE(IssueFS(clients, mountpoint), mountpoint, foreground=True, allow_other=False)
     print(f"Filesystem unmounted from: {mountpoint}")
 
 

@@ -1,6 +1,7 @@
 import requests
 
 from .issue import IssueInfo, IssueComment
+from .client import IssueTrackerClient
 
 
 class IssueInfo_GitHub(IssueInfo):
@@ -31,7 +32,7 @@ class IssueInfo_GitHub(IssueInfo):
         return super().to_ai(tracker_type="GitHub")
 
 
-class GitHub:
+class GitHub(IssueTrackerClient):
     def __init__(self, url, token):
         """
         Initialize GitHub API client.
@@ -39,8 +40,7 @@ class GitHub:
         Args:
             token: GitHub personal access token
         """
-        self.url = url
-        self.token = token
+        super().__init__(url, token)
 
     def headers(self):
         return {

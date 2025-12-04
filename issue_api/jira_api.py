@@ -1,6 +1,7 @@
 import requests
 
 from .issue import IssueInfo, IssueComment
+from .client import IssueTrackerClient
 
 
 class IssueInfo_Jira(IssueInfo):
@@ -19,10 +20,9 @@ class IssueInfo_Jira(IssueInfo):
         return super().to_ai(tracker_type="Jira")
 
 
-class Jira:
+class Jira(IssueTrackerClient):
     def __init__(self, url, token):
-        self.url = url
-        self.token = token
+        super().__init__(url, token)
 
     def headers(self):
         return {
